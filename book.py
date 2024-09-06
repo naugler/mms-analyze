@@ -3,6 +3,7 @@
 import base64
 from datetime import datetime
 import drawsvg as draw
+from PIL import ImageFont
 import re
 import surrogates
 import textwrap
@@ -11,7 +12,6 @@ import untangle
 inputpath = './sms.xml'
 outputpath = './sms-fixed.xml'
 imgpath = './book.svg'
-
 '''
 pattern = re.compile("&#([0-9][0-9][0-9][0-9][0-9]);&#([0-9][0-9][0-9][0-9][0-9]);")
 
@@ -31,21 +31,15 @@ with open(outputpath, 'a') as output:
 '''
 chat = untangle.parse(outputpath)
 
-print('Number of Messages: ',chat.smses['count'])
-
 messages = chat.smses.children
-times = [int(msg['date'])/1000 for msg in messages]
-print('Start: ',datetime.fromtimestamp(min(times)))
-print('End: ',datetime.fromtimestamp(max(times)))
 
 messages_sorted = dict()
 for message in messages:
     timestamp = int(message['date'])/1000
     messages_sorted[timestamp] = message
 
-pageWidth = 500
+pageWidth = 400
 pageHeight = 1000
-fontSize = 10
 imageSize = 200
 margin = 10
 yOffset = 0
@@ -53,8 +47,12 @@ page = 1
 background = '#222222'
 bobcolor = '#3d6070'
 cancolor = '#734978'
-font='Arial'
+fontColor = '#DDDDDD'
+fontName='Helvetica'
+fontSize = 10
+font=ImageFont.truetype('./Helvetica-emoji.ttf', size=fontSize)
 lasttime=0
+lastsender=""
 max_timeskip=1000*60*2
 d = draw.Drawing(pageWidth, pageHeight, origin=(0, 0))
 d.append(draw.Rectangle(0, 0, pageWidth, pageHeight, fill=background,rx='10',ry='10'))
@@ -64,38 +62,41 @@ def addPage():
     global page
     global yOffset
     d.save_svg("page"+str(page)+".svg")
+    
+    d.save_png("page"+str(page)+".png")
     page = page + 1
     yOffset = 0
     d = draw.Drawing(pageWidth, pageHeight, origin=(0,0))
     d.append(draw.Rectangle(0, 0, pageWidth, pageHeight, fill=background,rx='10',ry='10'))
 
-def checkPage(timestamp, yNeeded):
+def checkPage(timestamp, yNeeded, sender):
     global yOffset
     global lasttime
+    global lastsender
+    # skip to a new page if there isn't enough space
     if (yOffset+yNeeded > pageHeight):
         addPage()
-    # if (yOffset == 0):
-    #     timestring = datetime.fromtimestamp(timestamp).strftime('%x - %X')
-    #     d.append(draw.Text(timestring, fontSize*1.5, x=pageWidth/2, y=fontSize*2, text_anchor='middle', font_family=font, fill='white'))
-    #     yOffset += fontSize*3
-    print(datetime.fromtimestamp(timestamp).strftime('%x - %X'))
-    print(datetime.fromtimestamp(lasttime).strftime('%x - %X'))
-    print(timestamp - lasttime)
-    if (timestamp - lasttime > max_timeskip):
-        lasttime = timestamp
-        checkPage(timestamp, fontSize*1.5)
-        timestring = datetime.fromtimestamp(timestamp).strftime('%x - %X')
-        d.append(draw.Text(timestring, fontSize*1.5, x=pageWidth/2, y=yOffset+fontSize*2, text_anchor='middle', font_family=font, fill='white'))
+    # print the date at the top of the page or when it's been a while
+    if (yOffset == 0 or timestamp - lasttime > max_timeskip):
+        yOffset += fontSize
+        # checkPage(timestamp, fontSize*1.5, sender)
+        timestring = datetime.fromtimestamp(timestamp).strftime('%B %d - %H:%m')
+        d.append(draw.Text(timestring, fontSize*0.7, x=pageWidth/2, y=yOffset, text_anchor='middle', font_family=fontName, fill='#BBBBBB'))
         yOffset += fontSize*3
-
+        lasttime = timestamp
+    # use less space between texts from the same person
+    if (lastsender in sender):
+        yOffset -= margin*0.5
+    lastsender = sender[2:] # skip country code and stuff
+    
 
 def addText(timestamp, address, text):
     global yOffset
-    text = textwrap.fill(text, 74)
+    text = textwrap.fill(text, 70)
     if (text.count('\n') > 0):
         width = 350
     else:
-        width = margin*2+len(text)*5
+        width = font.getlength(surrogates.encode(text))+margin*2
 
     textOffset = margin + 10
     rectOffset = margin
@@ -107,15 +108,15 @@ def addText(timestamp, address, text):
         align = 'end'
         rectColor = bobcolor
     height = fontSize*text.count('\n')
-    checkPage(timestamp, height+fontSize+margin*2)
+    checkPage(timestamp, height+fontSize+margin*2, address)
 
     d.append(draw.Rectangle(rectOffset, yOffset, width, height+fontSize+margin, fill=rectColor, rx='3', ry='3'))
-    d.append(draw.Text(text, fontSize, x=textOffset, y=yOffset+fontSize*1.5, text_anchor=align, font_family=font, fill='white'))
+    d.append(draw.Text(text, fontSize, x=textOffset, y=yOffset+fontSize*1.5, text_anchor=align, font_family=fontName, fill='white'))
     yOffset += height+fontSize+margin*2
 
 def addImage(timestamp, address, imageData):
     global yOffset
-    checkPage(timestamp, imageSize)
+    checkPage(timestamp, imageSize+margin, address)
     xOffset = (margin, pageWidth-imageSize-margin) ['6604' in address]
     image = draw.Image(xOffset, yOffset, imageSize, imageSize, data=imageData,rx='10',ry='10')
     d.append(image)
@@ -123,15 +124,15 @@ def addImage(timestamp, address, imageData):
 
 def addMMS(timestamp, address, parts):
     for part in parts.part:
-        print("adding at yOffset=",yOffset)
+        # print("adding at yOffset=",yOffset)
         if (part['ct'].startswith('text')):
             addText(timestamp, address, part['text'])
         elif (part['ct'].startswith('image')):
             addImage(timestamp, address, base64.b64decode(part['data']))
-        elif (part['ct'].startswith('video')):
-            print("video here")
-        else:
-            print(part)
+        # elif (part['ct'].startswith('video')):
+        #     print("video here")
+        # else:
+        #     print(part)
 
 for timestamp,message in sorted(messages_sorted.items()):
     timestamp = int(message['date'])/1000
@@ -139,23 +140,8 @@ for timestamp,message in sorted(messages_sorted.items()):
         sender = list(filter(lambda x: x['type'] == '137', message.addrs.addr))[0]
         addMMS(timestamp, sender['address'], message.parts)
     else:
-        print(message['type']+" "+message['body'])
-        address = ('candice', '6604') ['2' in message['type']]
+        # print(message['type']+" "+message['body'])
+        address = ('4104464378', '4109036604') ['2' in message['type']]
         addText(timestamp, address, message['body'])
 
 addPage()
-#print('  Text: ',len(realtext))
-#print('  Image: ',len(image))
-#print('  Reactions: ',len(faketext))
-#print('  Video: ',len(video))
-#print('  Other: ',len(other))
-
-#d = draw.Drawing(200, 100, origin=(0, 0))
-#
-#for sms in chat.smses:
-#  text = dw.Text(sms., fontSize, x=None, y=None, *, center=False,
-#        line_height=1, line_offset=0, path=None,
-#        start_offset=None, path_args=None, tspan_args=None,
-#        cairo_fix=True, **kwargs)
-
-
